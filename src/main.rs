@@ -3,6 +3,7 @@ use std::env::args;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, stdin, stdout, Write};
 use std::os::fd::{AsFd, AsRawFd};
+use std::time::SystemTime;
 
 use nix::errno::Errno;
 use nix::libc::{atexit, VMIN, VTIME};
@@ -11,6 +12,7 @@ use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags, SetAr
 use scanf::sscanf;
 
 const KILO_VERSION: &str = "0.0.1";
+const KILO_TAB_STOP: usize = 8;
 
 #[derive(Debug, PartialEq)]
 enum EditorSpecialKey {
@@ -33,14 +35,21 @@ enum EditorKey {
 
 struct Row {
     row: String,
-    render: String
+    render: String,
 }
 
 impl Row {
     fn from_string(row: String) -> Row {
         Row {
             row: row.clone(),
-            render: row
+            render: row,
+        }
+    }
+
+    fn from_strings(row: String, render: String) -> Row {
+        Row {
+            row,
+            render,
         }
     }
 }
@@ -50,10 +59,22 @@ struct EditorConfig {
     screen_cols: i32,
     cx: i32,
     cy: i32,
+    rx: i32,
     rows: Vec<Row>,
     row_off: i32,
     col_off: i32,
+    filename: String,
+    status_msg: String,
+    message_time: u64,
 }
+
+fn get_sys_time_in_secs() -> u64 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_secs(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
 
 impl EditorConfig {
     fn new() -> Self {
@@ -65,12 +86,16 @@ impl EditorConfig {
         let (screen_cols, screen_rows) = win_size_res.unwrap();
         EditorConfig {
             screen_cols,
-            screen_rows,
+            screen_rows: screen_rows - 2,
             cx: 0,
             cy: 0,
+            rx: 0,
             rows: Vec::new(),
             row_off: 0,
             col_off: 0,
+            filename: String::new(),
+            status_msg: String::new(),
+            message_time: 0,
         }
     }
 
@@ -79,6 +104,7 @@ impl EditorConfig {
     }
 
     fn editor_open(&mut self, file_path: &str) {
+        self.filename = file_path.to_string();
         let file = fs::File::open(file_path).unwrap_or_else(|e| panic!("{}", e));
         let buff = BufReader::new(file);
         buff.lines()
@@ -88,6 +114,11 @@ impl EditorConfig {
     }
 
     fn editor_scroll(&mut self) {
+        self.rx = 0;
+        if self.cy < self.num_rows() {
+            self.rx = editor_row_cx_to_rx(&self.rows[self.cy as usize], self.cx);
+        }
+
         if self.cy < self.row_off {
             self.row_off = self.cy;
         }
@@ -103,11 +134,77 @@ impl EditorConfig {
         if self.cx >= self.col_off + self.screen_cols {
             self.col_off = self.cx - self.screen_cols + 1;
         }
+
+        if self.rx < self.col_off {
+            self.col_off = self.rx;
+        }
+
+        if self.rx >= self.col_off + self.screen_cols {
+            self.col_off = self.rx - self.screen_cols + 1;
+        }
+    }
+
+    fn editor_update_row(&mut self, row: String) -> Row {
+        let mut render = String::new();
+        for char in row.chars() {
+            if char == '\t' {
+                render.push(' ');
+                while render.len() % KILO_TAB_STOP != 0 { render.push(' '); }
+            } else {
+                render.push(char);
+            }
+        }
+        return Row::from_strings(row, render);
     }
 
     fn editor_append_row(&mut self, row: String) {
-        self.rows.push(Row::from_string(row));
+        let row = self.editor_update_row(row);
+        self.rows.push(row);
     }
+}
+
+fn editor_set_status_message(editor_config: &mut EditorConfig, message: &str) {
+    editor_config.status_msg = message.to_string();
+    editor_config.message_time = get_sys_time_in_secs();
+}
+
+fn editor_draw_status_bar(editor_config: &EditorConfig, buff: &mut Vec<u8>) {
+    buff.extend("\x1b[7m".as_bytes());
+    let num_rows = editor_config.rows.len();
+    let status_bytes = format!("{:.20} - {} lines",
+                               if editor_config.filename.len() > 0
+                               { &editor_config.filename } else { "[No Name]" }, num_rows).to_string();
+
+    let mut len = min(status_bytes.len(), editor_config.screen_cols as usize);
+
+    let line_info_bytes = format!("{}/{}", editor_config.cy + 1, editor_config.num_rows()).to_string();
+    let info_len = line_info_bytes.len();
+
+    buff.extend(status_bytes[..len].as_bytes());
+    while len < editor_config.screen_cols as usize {
+        if editor_config.screen_cols as usize - len == info_len {
+            buff.extend(line_info_bytes.as_bytes());
+            break;
+        } else {
+            buff.extend(" ".as_bytes());
+            len += 1;
+        }
+    }
+
+    buff.extend("\x1b[m".as_bytes());
+    buff.extend("\r\n".as_bytes());
+}
+
+fn editor_row_cx_to_rx(row: &Row, cx: i32) -> i32 {
+    let mut rx = 0;
+    let row: Vec<char> = row.row.chars().collect();
+    for j in 0..cx as usize {
+        if row[j] == '\t' {
+            rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+        }
+        rx += 1;
+    }
+    return rx as i32;
 }
 
 fn get_cursor_position() -> Result<(i32, i32), &'static str> {
@@ -190,6 +287,7 @@ fn enable_raw_mode() -> Result<(), nix::errno::Errno> {
     let mut terminal_attrs = termios::tcgetattr(stdin().as_raw_fd())?;
 
     // Input flags
+    terminal_attrs.input_flags;
     terminal_attrs.input_flags.set(InputFlags::IXON, false);
     terminal_attrs.input_flags.set(InputFlags::ICRNL, false);
     terminal_attrs.input_flags.set(InputFlags::INPCK, false);
@@ -251,9 +349,7 @@ fn editor_draw_rows(editor_config: &EditorConfig, buff: &mut Vec<u8>) {
         }
 
         buff.extend("\x1b[K".as_bytes());
-        if y < editor_config.screen_rows - 1 {
-            buff.extend("\r\n".as_bytes());
-        }
+        buff.extend("\r\n".as_bytes());
     }
 }
 
@@ -296,6 +392,14 @@ fn editor_move_cursor(editor_config: &mut EditorConfig, key: EditorSpecialKey) {
     }
 }
 
+fn editor_draw_message_bar(editor_config: &mut EditorConfig, buff: &mut Vec<u8>) {
+    buff.extend("\x1b[K".as_bytes());
+    let msg_len = min(editor_config.status_msg.len(), editor_config.screen_cols as usize);
+    if msg_len > 0 && get_sys_time_in_secs() - editor_config.message_time < 5 {
+        buff.extend(editor_config.status_msg.as_bytes());
+    }
+}
+
 fn refresh_screen(editor_config: &mut EditorConfig) {
     editor_config.editor_scroll();
 
@@ -304,9 +408,12 @@ fn refresh_screen(editor_config: &mut EditorConfig) {
     buff.extend("\x1b[H".as_bytes());
 
     editor_draw_rows(editor_config, &mut buff);
+    editor_draw_status_bar(editor_config, &mut buff);
+    editor_draw_message_bar(editor_config, &mut buff);
+
     buff.extend(format!("\x1b[{};{}H",
                         (editor_config.cy - editor_config.row_off) + 1,
-                        (editor_config.cx - editor_config.col_off) + 1).as_bytes());
+                        (editor_config.rx - editor_config.col_off) + 1).as_bytes());
 
     buff.extend("\x1b[?25h".as_bytes());
 
@@ -390,9 +497,20 @@ fn editor_process_key_press(editor_config: &mut EditorConfig) {
             editor_config.cx = 0;
         }
         EditorKey::SpecialKey(EditorSpecialKey::EndKey) => {
-            editor_config.cx = editor_config.screen_cols - 1;
+            if editor_config.cx < editor_config.num_rows() {
+                editor_config.cx = editor_config.rows[editor_config.cy as usize].row.len() as i32;
+            }
         }
         EditorKey::SpecialKey(EditorSpecialKey::PageUp) | EditorKey::SpecialKey(EditorSpecialKey::PageDown) => {
+            if c == EditorKey::SpecialKey(EditorSpecialKey::PageUp) {
+                editor_config.cy = editor_config.row_off;
+            } else if c == EditorKey::SpecialKey(EditorSpecialKey::PageDown) {
+                editor_config.cy = editor_config.row_off + editor_config.screen_rows - 1;
+                if editor_config.cy > editor_config.num_rows() {
+                    editor_config.cy = editor_config.num_rows();
+                }
+            }
+
             let mut times = editor_config.screen_rows;
             while times > 0 {
                 times -= 1;
@@ -418,6 +536,8 @@ fn editor_process_key_press(editor_config: &mut EditorConfig) {
 }
 
 fn run_editor(editor_config: &mut EditorConfig) {
+    editor_set_status_message(editor_config, "HELP: CTRL-Q = quit");
+
     loop {
         refresh_screen(editor_config);
         editor_process_key_press(editor_config);
