@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 nix = "0.26.1"
 rustix = { version = "0.36.5", features = ["termios"] }
+scanf = "1.2.1"
