@@ -1,15 +1,13 @@
+use std::{fs, process};
 use std::cmp::{max, min};
 use std::env::args;
-use std::fs;
 use std::io::{BufRead, BufReader, Read, stdin, stdout, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::time::SystemTime;
 
-use nix::errno::Errno;
-use nix::libc::{atexit, VMIN, VTIME};
-use nix::sys::termios;
-use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg};
 use scanf::sscanf;
+
+use kilo_in_rust::TermSettings;
 
 const KILO_VERSION: &str = "0.0.1";
 const KILO_TAB_STOP: usize = 8;
@@ -39,13 +37,6 @@ struct Row {
 }
 
 impl Row {
-    fn from_string(row: String) -> Row {
-        Row {
-            row: row.clone(),
-            render: row,
-        }
-    }
-
     fn from_strings(row: String, render: String) -> Row {
         Row {
             row,
@@ -54,7 +45,9 @@ impl Row {
     }
 }
 
+
 struct EditorConfig {
+    _term_settings: TermSettings,
     screen_rows: i32,
     screen_cols: i32,
     cx: i32,
@@ -77,7 +70,7 @@ fn get_sys_time_in_secs() -> u64 {
 
 
 impl EditorConfig {
-    fn new() -> Self {
+    fn from_settings(term_settings: TermSettings) -> Self {
         let win_size_res = get_window_size();
         if let Err(err) = win_size_res {
             die(err);
@@ -85,6 +78,7 @@ impl EditorConfig {
 
         let (screen_cols, screen_rows) = win_size_res.unwrap();
         EditorConfig {
+            _term_settings: term_settings,
             screen_cols,
             screen_rows: screen_rows - 2,
             cx: 0,
@@ -253,70 +247,6 @@ fn die(message: &str) {
     std::process::exit(1)
 }
 
-// TODO: I would really love to do this another way :(
-// Contemplate using some global object to store the original terminal state
-#[no_mangle]
-pub extern "C" fn disable_raw_mode() {
-    let mut terminal_attrs = termios::tcgetattr(stdin().as_raw_fd()).unwrap();
-
-    // Input flags
-    terminal_attrs.input_flags.set(InputFlags::IXON, true);
-    terminal_attrs.input_flags.set(InputFlags::ICRNL, true);
-
-    // Output flags
-    terminal_attrs.output_flags.set(OutputFlags::OPOST, true);
-
-    // Local flags
-    terminal_attrs.local_flags.set(LocalFlags::ECHO, true);
-    terminal_attrs.local_flags.set(LocalFlags::ICANON, true);
-    terminal_attrs.local_flags.set(LocalFlags::ISIG, true);
-    terminal_attrs.local_flags.set(LocalFlags::IEXTEN, true);
-
-    // Control flags
-    terminal_attrs.control_flags.set(ControlFlags::CS8, true);
-
-    // Set control chars
-    terminal_attrs.control_chars[VMIN] = 0;
-    terminal_attrs.control_chars[VTIME] = 1;
-
-    // Applying new terminal settings
-    termios::tcsetattr(stdin().as_raw_fd(), SetArg::TCSAFLUSH, &terminal_attrs).unwrap();
-}
-
-fn enable_raw_mode() -> Result<(), nix::errno::Errno> {
-    let mut terminal_attrs = termios::tcgetattr(stdin().as_raw_fd())?;
-
-    // Input flags
-    terminal_attrs.input_flags;
-    terminal_attrs.input_flags.set(InputFlags::IXON, false);
-    terminal_attrs.input_flags.set(InputFlags::ICRNL, false);
-    terminal_attrs.input_flags.set(InputFlags::INPCK, false);
-    terminal_attrs.input_flags.set(InputFlags::ISTRIP, false);
-    terminal_attrs.input_flags.set(InputFlags::BRKINT, false);
-
-    // Output flags
-    terminal_attrs.output_flags.set(OutputFlags::OPOST, false);
-
-    // Local flags
-    terminal_attrs.local_flags.set(LocalFlags::ECHO, false);
-    terminal_attrs.local_flags.set(LocalFlags::ICANON, false);
-    terminal_attrs.local_flags.set(LocalFlags::ISIG, false);
-    terminal_attrs.local_flags.set(LocalFlags::IEXTEN, false);
-
-    // Control flags
-    terminal_attrs.control_flags.set(ControlFlags::CS8, true);
-
-    // Set control chars
-    terminal_attrs.control_chars[VMIN] = 0;
-    terminal_attrs.control_chars[VTIME] = 1;
-
-    // Applying new terminal settings
-    termios::tcsetattr(stdin().as_raw_fd(), SetArg::TCSAFLUSH, &terminal_attrs)?;
-
-    return Ok(());
-}
-
-
 fn editor_draw_rows(editor_config: &EditorConfig, buff: &mut Vec<u8>) {
     for y in 0..editor_config.screen_rows {
         let filerow = y + editor_config.row_off;
@@ -423,10 +353,9 @@ fn refresh_screen(editor_config: &mut EditorConfig) {
 
 fn editor_read_key() -> EditorKey {
     let mut buff: [u8; 1] = [0];
-    let mut sdin = stdin();
     let c;
     loop {
-        let read_result = sdin.read(&mut buff[..]);
+        let read_result = stdin().read(&mut buff[..]);
         if read_result.is_err() {
             die("Error on read");
         }
@@ -490,7 +419,7 @@ fn editor_read_key() -> EditorKey {
     return EditorKey::Key(c);
 }
 
-fn editor_process_key_press(editor_config: &mut EditorConfig) {
+fn editor_process_key_press(editor_config: &mut EditorConfig) -> bool {
     let c = editor_read_key();
     match c {
         EditorKey::SpecialKey(EditorSpecialKey::HomeKey) => {
@@ -528,11 +457,12 @@ fn editor_process_key_press(editor_config: &mut EditorConfig) {
                 stdout().write("\x1b[2J".as_bytes()).unwrap();
                 stdout().write("\x1b[H".as_bytes()).unwrap();
                 stdout().flush().unwrap();
-                std::process::exit(0);
+                return true;
             }
         }
         _ => {}
     }
+    return false;
 }
 
 fn run_editor(editor_config: &mut EditorConfig) {
@@ -540,22 +470,22 @@ fn run_editor(editor_config: &mut EditorConfig) {
 
     loop {
         refresh_screen(editor_config);
-        editor_process_key_press(editor_config);
+        if editor_process_key_press(editor_config) {
+            break;
+        }
     };
 }
 
 
-fn main() -> Result<(), Errno> {
-    let en_raw_st = enable_raw_mode();
-    unsafe {
-        atexit(disable_raw_mode);
-    }
+fn main() {
+    let term_settings = TermSettings::from_fd(stdin().as_raw_fd());
 
-    if let Err(e) = en_raw_st {
+    if let Err(e) = term_settings {
         die(&e.to_string());
+        process::exit(1);
     }
 
-    let mut editor_config = EditorConfig::new();
+    let mut editor_config = EditorConfig::from_settings(term_settings.unwrap());
     let env_args = args().collect::<Vec<String>>();
 
     if env_args.len() >= 2 {
@@ -563,6 +493,4 @@ fn main() -> Result<(), Errno> {
     }
 
     run_editor(&mut editor_config);
-
-    Ok(())
 }

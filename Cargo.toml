@@ -6,6 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nix = "0.26.1"
-rustix = { version = "0.36.5", features = ["termios"] }
+termios = "0.3.3"
+libc = "0.2.138"
 scanf = "1.2.1"
+ioctl-rs = "0.2.0"
+rustix = {version = "0.36.5", features = ["termios"]}
