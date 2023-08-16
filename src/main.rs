@@ -299,7 +299,9 @@ fn editor_move_cursor(editor_config: &mut EditorConfig, key: EditorSpecialKey) {
                 editor_config.cx -= 1;
             } else if editor_config.cy > 0 {
                 editor_config.cy -= 1;
-                editor_config.cx = editor_config.rows[editor_config.cy as usize].row.len() as i32;
+                if editor_config.cy < editor_config.rows.len() as i32 {
+                    editor_config.cx = editor_config.rows[editor_config.cy as usize].row.len() as i32;
+                }
             }
         }
         EditorSpecialKey::ArrowRight => {
