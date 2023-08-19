@@ -1,7 +1,9 @@
 use std::{fs, io};
 use std::cmp::{max, min};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, stdin, stdout, Write};
 use std::os::fd::{AsFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::SystemTime;
 
 use scanf::sscanf;
@@ -9,9 +11,12 @@ use termios::*;
 
 const KILO_VERSION: &str = "0.0.1";
 const KILO_TAB_STOP: usize = 8;
+const KILO_QUIT_TIMES: usize = 3;
 
 const CTRL_Q: char = (b'q' & 0x1f) as char;
-
+const CTRL_H: char = (b'h' & 0x1f) as char;
+const CTRL_L: char = (b'l' & 0x1f) as char;
+const CTRL_S: char = (b's' & 0x1f) as char;
 
 pub fn erase_screen_for_exit() {
     stdout().write_all("\x1b[2J".as_bytes()).unwrap();
@@ -66,6 +71,7 @@ enum EditorSpecialKey {
     ArrowRight,
     ArrowUp,
     ArrowDown,
+    Backspace,
     DelKey,
     HomeKey,
     EndKey,
@@ -85,11 +91,36 @@ struct Row {
 }
 
 impl Row {
-    fn from_strings(row: String, render: String) -> Row {
+    fn from_string(row: &str) -> Row {
         Row {
-            row,
-            render,
+            row: row.to_string(),
+            render: Self::update_row(row),
         }
+    }
+
+    pub fn insert_at_pos(&mut self, pos: usize, ch: u8) {
+        String::insert(&mut self.row, pos, ch as char);
+        let updated_row = &self.row;
+        self.render = Self::update_row(updated_row);
+    }
+
+    pub fn delete_at_pos(&mut self, pos: usize) {
+        String::remove(&mut self.row, pos);
+        let updated_row = &self.row;
+        self.render = Self::update_row(updated_row);
+    }
+
+    fn update_row(row_str: &str) -> String {
+        let mut render = String::new();
+        for char in row_str.chars() {
+            if char == '\t' {
+                render.push(' ');
+                while render.len() % KILO_TAB_STOP != 0 { render.push(' '); }
+            } else {
+                render.push(char);
+            }
+        }
+        render
     }
 
     fn editor_row_cx_to_rx(&self, cx: usize) -> usize {
@@ -116,9 +147,10 @@ pub struct Editor {
     rows: Vec<Row>,
     row_off: usize,
     col_off: usize,
-    filename: String,
+    filename: Option<String>,
     status_msg: String,
     message_time: u64,
+    dirty: usize,
 }
 
 
@@ -138,21 +170,23 @@ impl Editor {
             rows: Vec::new(),
             row_off: 0,
             col_off: 0,
-            filename: String::new(),
+            filename: None,
             status_msg: String::new(),
             message_time: 0,
+            dirty: 0,
         })
     }
 
 
     pub fn editor_open(&mut self, file_path: &str) {
-        self.filename = file_path.to_string();
+        self.filename = Some(file_path.to_string());
         let file = fs::File::open(file_path).unwrap_or_else(|e| panic!("{}", e));
         let buff = BufReader::new(file);
         buff.lines()
             .filter(|r| r.is_ok())
             .map(|r| r.unwrap().trim_end().to_string())
-            .for_each(|line| self.editor_append_row(line));
+            .for_each(|line| self.insert_row(self.num_rows(), &line));
+        self.dirty = 0;
     }
 
     pub fn refresh_screen(&mut self) {
@@ -177,9 +211,18 @@ impl Editor {
     }
 
     pub fn editor_process_key_press(&mut self) -> bool {
+        static mut QUIT_TIMES: usize = KILO_QUIT_TIMES;
+
         let mut io_in = stdin();
         let c = Self::editor_read_key(&mut io_in);
         match c {
+            EditorKey::SpecialKey(EditorSpecialKey::Backspace) => {
+                self.del_char();
+            }
+            EditorKey::SpecialKey(EditorSpecialKey::DelKey) => {
+                self.editor_move_cursor(EditorSpecialKey::ArrowRight);
+                self.del_char();
+            }
             EditorKey::SpecialKey(EditorSpecialKey::HomeKey) => {
                 self.cx = 0;
             }
@@ -206,18 +249,70 @@ impl Editor {
                 }
             }
             EditorKey::SpecialKey(key) => self.editor_move_cursor(key),
-            EditorKey::Key('a') => self.editor_move_cursor(EditorSpecialKey::ArrowLeft),
-            EditorKey::Key('d') => self.editor_move_cursor(EditorSpecialKey::ArrowRight),
-            EditorKey::Key('w') => self.editor_move_cursor(EditorSpecialKey::ArrowUp),
-            EditorKey::Key('s') => self.editor_move_cursor(EditorSpecialKey::ArrowDown),
-            EditorKey::Key(c) => {
-                if c == CTRL_Q {
-                    erase_screen_for_exit();
-                    return true;
+            EditorKey::Key('\r') => {
+                self.insert_new_line()
+            }
+            EditorKey::Key('\x1b') => {}
+            EditorKey::Key(c) if c == CTRL_S => {
+                self.editor_save()
+                    .unwrap_or_else(|err| self.editor_set_status_message(&format!("Error saving file: {}", err)));
+            }
+            EditorKey::Key(c) if c == CTRL_H => {
+                self.del_char();
+            }
+            EditorKey::Key(c) if c == CTRL_L => {
+                // nothing
+            }
+            EditorKey::Key(c) if c == CTRL_Q => unsafe {
+                if self.dirty > 0 && QUIT_TIMES > 0 {
+                    self.editor_set_status_message(&format!("WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.", QUIT_TIMES));
+                    QUIT_TIMES -= 1;
+                    return false;
                 }
+                erase_screen_for_exit();
+                return true;
+            }
+            EditorKey::Key(c) => {
+                self.insert_char(c as u8);
             }
         }
+        // TODO: find a way to remove the unsafe blocks
+        // Right now it's fine as there will be only one thread modifying this
+        unsafe { QUIT_TIMES = KILO_QUIT_TIMES; }
         false
+    }
+
+    fn rows_to_string(&self) -> String {
+        self.rows.iter().map(|r| &*r.row).collect::<Vec<&str>>().join("\n")
+    }
+
+    fn editor_save(&mut self) -> io::Result<()> {
+        let filename;
+        if self.filename.is_none() {
+            let user_filename = self.editor_prompt("Save as (ESC to cancel)");
+            if let Some(fname) = user_filename {
+                filename = fname;
+            } else {
+                self.editor_set_status_message("Save aborted");
+                return Ok(());
+            }
+        } else {
+            filename = self.filename.clone().unwrap();
+        }
+        let rows_to_string = self.rows_to_string();
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o644)
+            .open(filename)?;
+        let num_bytes = rows_to_string.as_bytes().len();
+        file.set_len(num_bytes as u64)?;
+        file.write_all(rows_to_string.as_bytes())?;
+        self.editor_set_status_message(&format!("{} bytes saved to disk", num_bytes));
+        self.dirty = 0;
+
+        Ok(())
     }
 
     pub fn editor_set_status_message(&mut self, message: &str) {
@@ -225,6 +320,97 @@ impl Editor {
         self.message_time = get_sys_time_in_secs();
     }
 
+    fn insert_char(&mut self, ch: u8) {
+        if self.cy == self.num_rows() {
+            self.insert_row(self.num_rows(), "");
+        }
+        self.rows[self.cy].insert_at_pos(self.cx, ch);
+        self.cx += 1;
+        self.dirty += 1;
+    }
+
+    fn del_char(&mut self) {
+        if self.cy == self.num_rows() {
+            return;
+        }
+        if self.cy == 0 && self.cx == 0 {
+            return;
+        }
+
+        if self.cx > 0 {
+            self.rows[self.cy].delete_at_pos(self.cx - 1);
+            self.cx -= 1;
+            self.dirty += 1;
+        } else {
+            self.cx = self.rows[self.cy - 1].row.len();
+            let last_row = self.rows[self.cy - 1].row.as_str();
+            let curr_row = self.rows[self.cy].row.as_str();
+            self.rows[self.cy - 1] = Row::from_string(&(last_row.to_string() + curr_row));
+            self.del_row(self.cy);
+            self.cy -= 1;
+            self.dirty += 1;
+        }
+    }
+
+    fn insert_row(&mut self, row_idx: usize, row_content: &str) {
+        if row_idx > self.num_rows() {
+            return;
+        }
+
+        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_content));
+        self.dirty += 1;
+    }
+
+    fn del_row(&mut self, row_idx: usize) {
+        if row_idx >= self.num_rows() { return; }
+        Vec::remove(&mut self.rows, row_idx);
+        self.dirty += 1;
+    }
+
+    fn insert_new_line(&mut self) {
+        if self.cx == 0 {
+            self.insert_row(self.cy, "");
+        } else {
+            let row_string = &self.rows[self.cy].row.clone();
+            self.insert_row(self.cy + 1, &row_string[self.cx..]);
+            let row = self.rows[self.cy].row[..self.cx].to_string();
+            self.rows[self.cy] = Row::from_string(row.as_str());
+        }
+        self.cy += 1;
+        self.cx = 0;
+    }
+
+    fn editor_prompt(&mut self, prompt: &str) -> Option<String> {
+        let mut buff = String::new();
+        loop {
+            self.editor_set_status_message(&format!("{}: {}", prompt, buff));
+            self.refresh_screen();
+
+            let c = Self::editor_read_key(&mut stdin());
+            if EditorKey::Key('\x1b') == c {
+                self.editor_set_status_message("");
+                return None;
+            } else if EditorKey::Key('\r') == c && !buff.is_empty() {
+                return Some(buff);
+            }
+            match c {
+                EditorKey::SpecialKey(EditorSpecialKey::DelKey) | EditorKey::SpecialKey(EditorSpecialKey::Backspace) => {
+                    if !buff.is_empty() {
+                        buff.pop();
+                    }
+                }
+                EditorKey::Key(key) if key == CTRL_H => {
+                    if !buff.is_empty() {
+                        buff.pop();
+                    }
+                }
+                EditorKey::Key(key)  if !key.is_ascii_control() && (key as u8) < 128 => {
+                    buff.push(key);
+                }
+                _ => {}
+            };
+        }
+    }
 
     fn editor_read_key(io_in: &mut impl Read) -> EditorKey {
         fn read_one(io_in: &mut impl Read) -> Option<u8> {
@@ -298,6 +484,11 @@ impl Editor {
             }
 
             return EditorKey::Key('\x1b');
+        }
+
+        // Backspace
+        if c == 127 {
+            return EditorKey::SpecialKey(EditorSpecialKey::Backspace);
         }
         EditorKey::Key(c as char)
     }
@@ -380,19 +571,6 @@ impl Editor {
         }
     }
 
-    fn editor_update_row(&mut self, row: String) -> Row {
-        let mut render = String::new();
-        for char in row.chars() {
-            if char == '\t' {
-                render.push(' ');
-                while render.len() % KILO_TAB_STOP != 0 { render.push(' '); }
-            } else {
-                render.push(char);
-            }
-        }
-        Row::from_strings(row, render)
-    }
-
     fn editor_draw_rows(&self, buff: &mut Vec<u8>) {
         for y in 0..self.screen_rows {
             let filerow = y + self.row_off;
@@ -432,9 +610,10 @@ impl Editor {
     fn editor_draw_status_bar(&self, buff: &mut Vec<u8>) {
         buff.extend("\x1b[7m".as_bytes());
         let num_rows = self.rows.len();
-        let status_bytes = format!("{:.20} - {} lines",
-                                   if !self.filename.is_empty()
-                                   { &self.filename } else { "[No Name]" }, num_rows).to_string();
+        let status_bytes = format!("{:.20} - {} lines {}",
+                                   if let Some(filename) = self.filename.as_ref()
+                                   { filename } else { "[No Name]" }, num_rows,
+                                   if self.dirty > 0 { "(modified)" } else { "" }).to_string();
 
         let mut len = min(status_bytes.len(), self.screen_cols);
 
@@ -454,12 +633,6 @@ impl Editor {
 
         buff.extend("\x1b[m".as_bytes());
         buff.extend("\r\n".as_bytes());
-    }
-
-
-    fn editor_append_row(&mut self, row: String) {
-        let row = self.editor_update_row(row);
-        self.rows.push(row);
     }
 
     fn num_rows(&self) -> usize {

@@ -1,12 +1,12 @@
-fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) {fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) {
+fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) {fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) { fn editor_process_key_press(editor_config: &mut EditorConfig) {
 use std::env::args;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, stdin, stdout, Write};
 use std::os::fd::{AsFd, AsRawFd};
 	hjghjg
-use nix::errno::Errno;
-use nix::libc::{atexit, VMIN, VTIME};
-use nix::sys::termios;
+use nvhjix::errno::Errno;
+use nixvkk::libc::{atexit, VMIN, VTIME};
+use nix::syfs::termios;
 use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg};
 use scanf::sscanf;
 
