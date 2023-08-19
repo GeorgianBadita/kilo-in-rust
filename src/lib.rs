@@ -17,11 +17,53 @@ const CTRL_Q: char = (b'q' & 0x1f) as char;
 const CTRL_H: char = (b'h' & 0x1f) as char;
 const CTRL_L: char = (b'l' & 0x1f) as char;
 const CTRL_S: char = (b's' & 0x1f) as char;
+const CTRL_F: char = (b'f' & 0x1f) as char;
 
 pub fn erase_screen_for_exit() {
     stdout().write_all("\x1b[2J".as_bytes()).unwrap();
     stdout().write_all("\x1b[H".as_bytes()).unwrap();
     stdout().flush().unwrap();
+}
+
+fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
+    if key == EditorKey::Key('\x1b') || key == EditorKey::Key('\r') {
+        editor.search_state.direction = 1;
+        editor.search_state.last_match = -1;
+        return;
+    } else if key == EditorKey::SpecialKey(EditorSpecialKey::ArrowRight)
+        || key == EditorKey::SpecialKey(EditorSpecialKey::ArrowDown) {
+        editor.search_state.direction = 1;
+    } else if key == EditorKey::SpecialKey(EditorSpecialKey::ArrowLeft)
+        || key == EditorKey::SpecialKey(EditorSpecialKey::ArrowUp) {
+        editor.search_state.direction = -1;
+    } else {
+        editor.search_state.direction = 1;
+        editor.search_state.last_match = -1;
+    }
+
+    if editor.search_state.last_match == -1 {
+        editor.search_state.direction = 1;
+    }
+
+    let mut current = editor.search_state.last_match;
+
+    for idx in 0..editor.num_rows() {
+        current += editor.search_state.direction;
+        if current == -1 {
+            current = editor.num_rows() as i32 - 1;
+        } else if current == editor.num_rows() as i32 {
+            current = 0;
+        }
+
+        let row = &editor.rows[current as usize];
+        if let Some(pos) = row.render.find(query) {
+            editor.search_state.last_match = current;
+            editor.cy = current as usize;
+            editor.cx = row.editor_row_rx_to_cx(pos);
+            editor.row_off = editor.num_rows();
+            break;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -134,8 +176,37 @@ impl Row {
         }
         rx
     }
+
+    fn editor_row_rx_to_cx(&self, rx: usize) -> usize {
+        let mut cur_rx = 0;
+        let row: Vec<char> = self.row.chars().collect();
+
+        for cx in 0..self.row.len() {
+            if row[cx] == '\t' {
+                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+            }
+            cur_rx += 1;
+            if cur_rx > rx {
+                return cx;
+            }
+        }
+        return self.row.len() - 1;
+    }
 }
 
+struct SearchState {
+    last_match: i32,
+    direction: i32,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            last_match: -1,
+            direction: 1,
+        }
+    }
+}
 
 pub struct Editor {
     _term_settings: TermSettings,
@@ -151,6 +222,8 @@ pub struct Editor {
     status_msg: String,
     message_time: u64,
     dirty: usize,
+    quit_tries: usize,
+    search_state: SearchState,
 }
 
 
@@ -174,6 +247,8 @@ impl Editor {
             status_msg: String::new(),
             message_time: 0,
             dirty: 0,
+            quit_tries: KILO_QUIT_TIMES,
+            search_state: SearchState::default(),
         })
     }
 
@@ -211,8 +286,6 @@ impl Editor {
     }
 
     pub fn editor_process_key_press(&mut self) -> bool {
-        static mut QUIT_TIMES: usize = KILO_QUIT_TIMES;
-
         let mut io_in = stdin();
         let c = Self::editor_read_key(&mut io_in);
         match c {
@@ -257,16 +330,19 @@ impl Editor {
                 self.editor_save()
                     .unwrap_or_else(|err| self.editor_set_status_message(&format!("Error saving file: {}", err)));
             }
+            EditorKey::Key(c) if c == CTRL_F => {
+                self.editor_find();
+            }
             EditorKey::Key(c) if c == CTRL_H => {
                 self.del_char();
             }
             EditorKey::Key(c) if c == CTRL_L => {
                 // nothing
             }
-            EditorKey::Key(c) if c == CTRL_Q => unsafe {
-                if self.dirty > 0 && QUIT_TIMES > 0 {
-                    self.editor_set_status_message(&format!("WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.", QUIT_TIMES));
-                    QUIT_TIMES -= 1;
+            EditorKey::Key(c) if c == CTRL_Q => {
+                if self.dirty > 0 && self.quit_tries > 0 {
+                    self.editor_set_status_message(&format!("WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.", self.quit_tries));
+                    self.quit_tries -= 1;
                     return false;
                 }
                 erase_screen_for_exit();
@@ -276,9 +352,8 @@ impl Editor {
                 self.insert_char(c as u8);
             }
         }
-        // TODO: find a way to remove the unsafe blocks
-        // Right now it's fine as there will be only one thread modifying this
-        unsafe { QUIT_TIMES = KILO_QUIT_TIMES; }
+
+        self.quit_tries = KILO_QUIT_TIMES;
         false
     }
 
@@ -286,10 +361,26 @@ impl Editor {
         self.rows.iter().map(|r| &*r.row).collect::<Vec<&str>>().join("\n")
     }
 
+    fn editor_find(&mut self) {
+        let cx = self.cx;
+        let cy = self.cy;
+        let row_off = self.row_off;
+        let col_off = self.col_off;
+
+        let query = self.editor_prompt("Search (Use ESC/Arrows/Enter)", Some(editor_find_callback));
+        // reset cursor state
+        if query.is_none() {
+            self.cx = cx;
+            self.cy = cy;
+            self.row_off = row_off;
+            self.col_off = col_off;
+        }
+    }
+
     fn editor_save(&mut self) -> io::Result<()> {
         let filename;
         if self.filename.is_none() {
-            let user_filename = self.editor_prompt("Save as (ESC to cancel)");
+            let user_filename = self.editor_prompt("Save as (ESC to cancel)", None::<fn(&mut _, &_, _)>);
             if let Some(fname) = user_filename {
                 filename = fname;
             } else {
@@ -380,7 +471,9 @@ impl Editor {
         self.cx = 0;
     }
 
-    fn editor_prompt(&mut self, prompt: &str) -> Option<String> {
+    fn editor_prompt<G>(&mut self, prompt: &str, callback: Option<G>) -> Option<String>
+        where G: Fn(&mut Editor, &String, EditorKey)
+    {
         let mut buff = String::new();
         loop {
             self.editor_set_status_message(&format!("{}: {}", prompt, buff));
@@ -389,8 +482,14 @@ impl Editor {
             let c = Self::editor_read_key(&mut stdin());
             if EditorKey::Key('\x1b') == c {
                 self.editor_set_status_message("");
+                if callback.is_some() {
+                    callback.as_ref().unwrap()(self, &buff, EditorKey::Key('\x1b'));
+                }
                 return None;
             } else if EditorKey::Key('\r') == c && !buff.is_empty() {
+                if callback.is_some() {
+                    callback.as_ref().unwrap()(self, &buff, EditorKey::Key('r'));
+                }
                 return Some(buff);
             }
             match c {
@@ -409,6 +508,10 @@ impl Editor {
                 }
                 _ => {}
             };
+
+            if callback.is_some() {
+                callback.as_ref().unwrap()(self, &buff, c);
+            }
         }
     }
 

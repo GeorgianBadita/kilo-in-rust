@@ -6,7 +6,7 @@ use std::process;
 use kilo_in_rust::{Editor, erase_screen_for_exit, TermSettings};
 
 fn run_editor(editor: &mut Editor) {
-    editor.editor_set_status_message("HELP: CTRL-S = save | CTRL-Q = quit");
+    editor.editor_set_status_message("HELP: CTRL-S = save | CTRL-Q = quit | CTRL-F = find");
 
     loop {
         editor.refresh_screen();
