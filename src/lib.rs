@@ -13,6 +13,8 @@ const KILO_VERSION: &str = "0.0.1";
 const KILO_TAB_STOP: usize = 8;
 const KILO_QUIT_TIMES: usize = 3;
 
+const HL_HIGHLIGHT_NUMBERS: i32 = 1 << 0;
+
 const CTRL_Q: char = (b'q' & 0x1f) as char;
 const CTRL_H: char = (b'h' & 0x1f) as char;
 const CTRL_L: char = (b'l' & 0x1f) as char;
@@ -25,7 +27,17 @@ pub fn erase_screen_for_exit() {
     stdout().flush().unwrap();
 }
 
+
+fn is_separator(c: char) -> bool {
+    return c.is_ascii_whitespace() || c == '\0' || ",.()+-/*=~%<>[];".contains(c);
+}
+
 fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
+    if !editor.search_state.saved_hl.is_empty() {
+        editor.rows[editor.search_state.saved_hl_line as usize].hl = editor.search_state.saved_hl.clone();
+        editor.search_state.saved_hl.clear();
+    }
+
     if key == EditorKey::Key('\x1b') || key == EditorKey::Key('\r') {
         editor.search_state.direction = 1;
         editor.search_state.last_match = -1;
@@ -47,7 +59,7 @@ fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
 
     let mut current = editor.search_state.last_match;
 
-    for idx in 0..editor.num_rows() {
+    for _ in 0..editor.num_rows() {
         current += editor.search_state.direction;
         if current == -1 {
             current = editor.num_rows() as i32 - 1;
@@ -55,12 +67,19 @@ fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
             current = 0;
         }
 
-        let row = &editor.rows[current as usize];
+        let num_rows = editor.num_rows();
+        let row = &mut editor.rows[current as usize];
         if let Some(pos) = row.render.find(query) {
             editor.search_state.last_match = current;
             editor.cy = current as usize;
             editor.cx = row.editor_row_rx_to_cx(pos);
-            editor.row_off = editor.num_rows();
+            editor.row_off = num_rows;
+
+            editor.search_state.saved_hl_line = current;
+            editor.search_state.saved_hl = row.hl.clone();
+            for idx in pos..pos + query.len() {
+                row.hl[idx] = EditorHighlight::Match;
+            }
             break;
         }
     }
@@ -130,29 +149,36 @@ enum EditorKey {
 struct Row {
     row: String,
     render: String,
+    hl: Vec<EditorHighlight>,
 }
 
 impl Row {
     fn from_string(row: &str) -> Row {
+        let (render, highlight) = Self::update_row(row);
         Row {
             row: row.to_string(),
-            render: Self::update_row(row),
+            render,
+            hl: highlight,
         }
     }
 
     pub fn insert_at_pos(&mut self, pos: usize, ch: u8) {
         String::insert(&mut self.row, pos, ch as char);
         let updated_row = &self.row;
-        self.render = Self::update_row(updated_row);
+        let (render, highlight) = Self::update_row(updated_row);
+        self.render = render;
+        self.hl = highlight;
     }
 
     pub fn delete_at_pos(&mut self, pos: usize) {
         String::remove(&mut self.row, pos);
         let updated_row = &self.row;
-        self.render = Self::update_row(updated_row);
+        let (render, highlight) = Self::update_row(updated_row);
+        self.render = render;
+        self.hl = highlight;
     }
 
-    fn update_row(row_str: &str) -> String {
+    fn update_row(row_str: &str) -> (String, Vec<EditorHighlight>) {
         let mut render = String::new();
         for char in row_str.chars() {
             if char == '\t' {
@@ -162,7 +188,33 @@ impl Row {
                 render.push(char);
             }
         }
-        render
+        let highlight = Self::update_syntax(&render);
+        (render, highlight)
+    }
+
+    fn update_syntax(render: &str) -> Vec<EditorHighlight> {
+        let mut highlight = vec![EditorHighlight::Normal; render.len()];
+
+        let mut prev_step = true;
+        let mut idx = 0;
+        let chars: Vec<char> = render.chars().collect();
+        while idx < chars.len() {
+            let ch = chars[idx];
+            let prev_hl = if idx > 0 { &highlight[idx - 1] } else { &EditorHighlight::Normal };
+
+            if (ch.is_ascii_digit() && (prev_step || *prev_hl == EditorHighlight::Number)) ||
+                (ch == '.' && *prev_hl == EditorHighlight::Number) {
+                highlight[idx] = EditorHighlight::Number;
+                idx += 1;
+                prev_step = false;
+                continue;
+            }
+
+            prev_step = is_separator(ch);
+            idx += 1
+        }
+
+        highlight
     }
 
     fn editor_row_cx_to_rx(&self, cx: usize) -> usize {
@@ -197,6 +249,8 @@ impl Row {
 struct SearchState {
     last_match: i32,
     direction: i32,
+    saved_hl_line: i32,
+    saved_hl: Vec<EditorHighlight>,
 }
 
 impl Default for SearchState {
@@ -204,6 +258,24 @@ impl Default for SearchState {
         Self {
             last_match: -1,
             direction: 1,
+            saved_hl_line: 0,
+            saved_hl: Vec::new(),
+        }
+    }
+}
+
+struct EditorSyntax {
+    file_type: String,
+    file_match: Vec<String>,
+    flags: i32,
+}
+
+impl EditorSyntax {
+    fn new(file_type: String, file_match: Vec<String>, flags: i32) -> Self {
+        EditorSyntax {
+            file_type,
+            file_match,
+            flags,
         }
     }
 }
@@ -226,6 +298,23 @@ pub struct Editor {
     search_state: SearchState,
 }
 
+
+#[derive(Clone, PartialEq)]
+enum EditorHighlight {
+    Normal,
+    Number,
+    Match,
+}
+
+impl EditorHighlight {
+    fn to_color(&self) -> usize {
+        match self {
+            EditorHighlight::Number => 31,
+            EditorHighlight::Match => 34,
+            _ => 37
+        }
+    }
+}
 
 impl Editor {
     pub fn from_settings(term_settings: TermSettings) -> Result<Self, &'static str> {
@@ -700,8 +789,25 @@ impl Editor {
                 let row_num = filerow;
                 let col_num = self.col_off;
                 if len != 0 {
-                    buff.extend(self
-                        .rows[row_num].render[col_num..col_num + len].as_bytes());
+                    let hl = &self.rows[row_num].hl[self.col_off..];
+                    let mut current_color = 0;
+                    for (idx, char) in self.rows[row_num].render[col_num..col_num + len].to_string().chars().enumerate() {
+                        if hl[idx] == EditorHighlight::Normal {
+                            if current_color != 0 {
+                                buff.extend("\x1b[39m".as_bytes());
+                                current_color = 0;
+                            }
+                            buff.push(char as u8);
+                        } else {
+                            let color = hl[idx].to_color();
+                            if color != current_color {
+                                current_color = color;
+                                buff.extend(format!("\x1b[{}m", color).as_bytes());
+                            }
+                            buff.push(char as u8);
+                        }
+                    }
+                    buff.extend("\x1b[39m".as_bytes());
                 }
             }
 
