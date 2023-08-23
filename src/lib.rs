@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, stdin, stdout, Write};
 use std::os::fd::{AsFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+use std::string::ToString;
 use std::time::SystemTime;
 
 use scanf::sscanf;
@@ -14,6 +16,7 @@ const KILO_TAB_STOP: usize = 8;
 const KILO_QUIT_TIMES: usize = 3;
 
 const HL_HIGHLIGHT_NUMBERS: i32 = 1 << 0;
+const HL_HIGHLIGHT_STRINGS: i32 = 1 << 1;
 
 const CTRL_Q: char = (b'q' & 0x1f) as char;
 const CTRL_H: char = (b'h' & 0x1f) as char;
@@ -153,8 +156,8 @@ struct Row {
 }
 
 impl Row {
-    fn from_string(row: &str) -> Row {
-        let (render, highlight) = Self::update_row(row);
+    fn from_string(row: &str, editor_syntax: &Option<EditorSyntax>) -> Row {
+        let (render, highlight) = Self::update_row(row, editor_syntax);
         Row {
             row: row.to_string(),
             render,
@@ -162,23 +165,23 @@ impl Row {
         }
     }
 
-    pub fn insert_at_pos(&mut self, pos: usize, ch: u8) {
+    pub fn insert_at_pos(&mut self, pos: usize, ch: u8, editor_syntax: &Option<EditorSyntax>) {
         String::insert(&mut self.row, pos, ch as char);
         let updated_row = &self.row;
-        let (render, highlight) = Self::update_row(updated_row);
+        let (render, highlight) = Self::update_row(updated_row, editor_syntax);
         self.render = render;
         self.hl = highlight;
     }
 
-    pub fn delete_at_pos(&mut self, pos: usize) {
+    pub fn delete_at_pos(&mut self, pos: usize, editor_syntax: &Option<EditorSyntax>) {
         String::remove(&mut self.row, pos);
         let updated_row = &self.row;
-        let (render, highlight) = Self::update_row(updated_row);
+        let (render, highlight) = Self::update_row(updated_row, editor_syntax);
         self.render = render;
         self.hl = highlight;
     }
 
-    fn update_row(row_str: &str) -> (String, Vec<EditorHighlight>) {
+    fn update_row(row_str: &str, editor_syntax: &Option<EditorSyntax>) -> (String, Vec<EditorHighlight>) {
         let mut render = String::new();
         for char in row_str.chars() {
             if char == '\t' {
@@ -188,26 +191,67 @@ impl Row {
                 render.push(char);
             }
         }
-        let highlight = Self::update_syntax(&render);
+        let highlight = Self::update_syntax(&render, editor_syntax);
         (render, highlight)
     }
 
-    fn update_syntax(render: &str) -> Vec<EditorHighlight> {
+    fn update_syntax(render: &str, editor_syntax: &Option<EditorSyntax>) -> Vec<EditorHighlight> {
         let mut highlight = vec![EditorHighlight::Normal; render.len()];
 
+        if editor_syntax.as_ref().is_none() {
+            return highlight;
+        }
+
+        let scs = editor_syntax.as_ref().unwrap().single_comment_start.clone();
+
         let mut prev_step = true;
+        let mut in_string = 0;
+
         let mut idx = 0;
         let chars: Vec<char> = render.chars().collect();
         while idx < chars.len() {
             let ch = chars[idx];
-            let prev_hl = if idx > 0 { &highlight[idx - 1] } else { &EditorHighlight::Normal };
+            let prev_hl = if idx > 0 { highlight[idx - 1].clone() } else { EditorHighlight::Normal };
 
-            if (ch.is_ascii_digit() && (prev_step || *prev_hl == EditorHighlight::Number)) ||
-                (ch == '.' && *prev_hl == EditorHighlight::Number) {
-                highlight[idx] = EditorHighlight::Number;
-                idx += 1;
-                prev_step = false;
-                continue;
+            if !scs.is_empty() && render[idx..].starts_with(&scs) {
+                for h_idx in idx..render.len() {
+                    highlight[h_idx] = EditorHighlight::Comment;
+                }
+                break
+            }
+
+            if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_STRINGS != 0 {
+                if in_string != 0 {
+                    highlight[idx] = EditorHighlight::String;
+                    if ch == '\\' && idx + 1 < chars.len() {
+                        highlight[idx + 1] = EditorHighlight::String;
+                        idx += 1;
+                        continue;
+                    }
+                    if ch as u8 == in_string {
+                        in_string = 0;
+                    }
+                    idx += 1;
+                    prev_step = true;
+                    continue;
+                } else {
+                    if ch == '"' || ch == '\'' {
+                        in_string = ch as u8;
+                        highlight[idx] = EditorHighlight::String;
+                        idx += 1;
+                        continue;
+                    }
+                }
+            }
+
+            if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_NUMBERS != 0 {
+                if (ch.is_ascii_digit() && (prev_step || prev_hl == EditorHighlight::Number)) ||
+                    (ch == '.' && prev_hl == EditorHighlight::Number) {
+                    highlight[idx] = EditorHighlight::Number;
+                    idx += 1;
+                    prev_step = false;
+                    continue;
+                }
             }
 
             prev_step = is_separator(ch);
@@ -264,17 +308,20 @@ impl Default for SearchState {
     }
 }
 
+#[derive(Clone)]
 struct EditorSyntax {
     file_type: String,
     file_match: Vec<String>,
+    single_comment_start: String,
     flags: i32,
 }
 
 impl EditorSyntax {
-    fn new(file_type: String, file_match: Vec<String>, flags: i32) -> Self {
+    fn new(file_type: String, file_match: Vec<String>,single_comment_start: String, flags: i32) -> Self {
         EditorSyntax {
             file_type,
             file_match,
+            single_comment_start,
             flags,
         }
     }
@@ -296,12 +343,16 @@ pub struct Editor {
     dirty: usize,
     quit_tries: usize,
     search_state: SearchState,
+    editor_syntax_db: Vec<EditorSyntax>,
+    curr_editor_syntax: Option<EditorSyntax>,
 }
 
 
 #[derive(Clone, PartialEq)]
 enum EditorHighlight {
     Normal,
+    Comment,
+    String,
     Number,
     Match,
 }
@@ -309,6 +360,8 @@ enum EditorHighlight {
 impl EditorHighlight {
     fn to_color(&self) -> usize {
         match self {
+            EditorHighlight::Comment => 36,
+            EditorHighlight::String => 35,
             EditorHighlight::Number => 31,
             EditorHighlight::Match => 34,
             _ => 37
@@ -338,12 +391,20 @@ impl Editor {
             dirty: 0,
             quit_tries: KILO_QUIT_TIMES,
             search_state: SearchState::default(),
+            editor_syntax_db: vec![EditorSyntax {
+                file_type: "rs".to_string(),
+                file_match: vec![".rs".to_string()],
+                single_comment_start: "//".to_string(),
+                flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+            }],
+            curr_editor_syntax: None,
         })
     }
 
 
     pub fn editor_open(&mut self, file_path: &str) {
         self.filename = Some(file_path.to_string());
+        self.select_syntax_highlight();
         let file = fs::File::open(file_path).unwrap_or_else(|e| panic!("{}", e));
         let buff = BufReader::new(file);
         buff.lines()
@@ -450,6 +511,27 @@ impl Editor {
         self.rows.iter().map(|r| &*r.row).collect::<Vec<&str>>().join("\n")
     }
 
+    fn select_syntax_highlight(&mut self) {
+        self.curr_editor_syntax = None;
+        if let Some(filename) = self.filename.as_ref() {
+            let ext = Path::new(filename).extension();
+            if let Some(extension) = ext {
+                let ext_str = extension.to_str().unwrap();
+                for hl_entry in &self.editor_syntax_db {
+                    if hl_entry.file_type == ext_str {
+                        self.curr_editor_syntax = Some(hl_entry.clone());
+                        let new_rows: Vec<Row> = self.rows.iter().map(|r| {
+                            let new_row = Row::from_string(&r.row, &self.curr_editor_syntax);
+                            new_row
+                        }).collect();
+                        self.rows = new_rows;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     fn editor_find(&mut self) {
         let cx = self.cx;
         let cy = self.cy;
@@ -467,18 +549,18 @@ impl Editor {
     }
 
     fn editor_save(&mut self) -> io::Result<()> {
-        let filename;
         if self.filename.is_none() {
             let user_filename = self.editor_prompt("Save as (ESC to cancel)", None::<fn(&mut _, &_, _)>);
             if let Some(fname) = user_filename {
-                filename = fname;
+                self.filename = Some(fname);
             } else {
                 self.editor_set_status_message("Save aborted");
                 return Ok(());
             }
-        } else {
-            filename = self.filename.clone().unwrap();
+            self.select_syntax_highlight();
         }
+
+        let filename = self.filename.as_ref().unwrap().clone();
         let rows_to_string = self.rows_to_string();
         let mut file = File::options()
             .read(true)
@@ -504,7 +586,7 @@ impl Editor {
         if self.cy == self.num_rows() {
             self.insert_row(self.num_rows(), "");
         }
-        self.rows[self.cy].insert_at_pos(self.cx, ch);
+        self.rows[self.cy].insert_at_pos(self.cx, ch, &self.curr_editor_syntax);
         self.cx += 1;
         self.dirty += 1;
     }
@@ -518,14 +600,14 @@ impl Editor {
         }
 
         if self.cx > 0 {
-            self.rows[self.cy].delete_at_pos(self.cx - 1);
+            self.rows[self.cy].delete_at_pos(self.cx - 1, &self.curr_editor_syntax);
             self.cx -= 1;
             self.dirty += 1;
         } else {
             self.cx = self.rows[self.cy - 1].row.len();
             let last_row = self.rows[self.cy - 1].row.as_str();
             let curr_row = self.rows[self.cy].row.as_str();
-            self.rows[self.cy - 1] = Row::from_string(&(last_row.to_string() + curr_row));
+            self.rows[self.cy - 1] = Row::from_string(&(last_row.to_string() + curr_row), &self.curr_editor_syntax);
             self.del_row(self.cy);
             self.cy -= 1;
             self.dirty += 1;
@@ -537,7 +619,7 @@ impl Editor {
             return;
         }
 
-        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_content));
+        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_content, &self.curr_editor_syntax));
         self.dirty += 1;
     }
 
@@ -554,7 +636,7 @@ impl Editor {
             let row_string = &self.rows[self.cy].row.clone();
             self.insert_row(self.cy + 1, &row_string[self.cx..]);
             let row = self.rows[self.cy].row[..self.cx].to_string();
-            self.rows[self.cy] = Row::from_string(row.as_str());
+            self.rows[self.cy] = Row::from_string(row.as_str(), &self.curr_editor_syntax);
         }
         self.cy += 1;
         self.cx = 0;
@@ -826,7 +908,10 @@ impl Editor {
 
         let mut len = min(status_bytes.len(), self.screen_cols);
 
-        let line_info_bytes = format!("{}/{}", self.cy + 1, self.num_rows()).to_string();
+        let line_info_bytes = format!("{} | {}/{}",
+                                      if let Some(syntax) = self.curr_editor_syntax.as_ref()
+                                      { &syntax.file_type } else { "no file type" },
+                                      self.cy + 1, self.num_rows()).to_string();
         let info_len = line_info_bytes.len();
 
         buff.extend(status_bytes[..len].as_bytes());

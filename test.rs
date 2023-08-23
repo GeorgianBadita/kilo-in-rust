@@ -1,0 +1,3 @@
+fn main() {
+ "aksflajfklajsf"
+}
