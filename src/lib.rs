@@ -150,19 +150,29 @@ enum EditorKey {
 }
 
 struct Row {
+    idx: usize,
     row: String,
     render: String,
     hl: Vec<EditorHighlight>,
+    hl_open_comment: bool,
+    ed_syntax: Option<EditorSyntax>
 }
 
 impl Row {
-    fn from_string(row: &str, editor_syntax: &Option<EditorSyntax>) -> Row {
+    fn from_string(idx: usize, row: &str, editor_syntax: &Option<EditorSyntax>) -> Row {
         let (render, highlight) = Self::update_row(row, editor_syntax);
         Row {
+            idx,
             row: row.to_string(),
             render,
             hl: highlight,
+            hl_open_comment: false,
+            ed_syntax: editor_syntax.clone()
         }
+    }
+
+    pub fn set_idx(&mut self, idx: usize) {
+        self.idx = idx;
     }
 
     pub fn insert_at_pos(&mut self, pos: usize, ch: u8, editor_syntax: &Option<EditorSyntax>) {
@@ -202,10 +212,17 @@ impl Row {
             return highlight;
         }
 
-        let scs = editor_syntax.as_ref().unwrap().single_comment_start.clone();
+        let syntax = editor_syntax.as_ref().unwrap();
+        let keywords1 = syntax.keywords1.clone();
+        let keywords2 = syntax.keywords2.clone();
+
+        let scs = syntax.single_comment_start.clone();
+        let mcs = syntax.multiline_comment_start.clone();
+        let mce = syntax.multiline_comment_end.clone();
 
         let mut prev_step = true;
         let mut in_string = 0;
+        let mut in_comment = false;
 
         let mut idx = 0;
         let chars: Vec<char> = render.chars().collect();
@@ -213,11 +230,40 @@ impl Row {
             let ch = chars[idx];
             let prev_hl = if idx > 0 { highlight[idx - 1].clone() } else { EditorHighlight::Normal };
 
-            if !scs.is_empty() && render[idx..].starts_with(&scs) {
+            if !scs.is_empty() && in_string == 0 && !in_comment && render[idx..].starts_with(&scs) {
                 for h_idx in idx..render.len() {
                     highlight[h_idx] = EditorHighlight::Comment;
                 }
-                break
+                break;
+            }
+
+            if !mcs.is_empty() && !mce.is_empty() && in_string == 0 {
+                if in_comment {
+                    highlight[idx] = EditorHighlight::MlComment;
+                    if render[idx..].starts_with(&mce) {
+                        for hl_idx in idx..idx + mce.len() {
+                            if hl_idx < highlight.len() {
+                                highlight[hl_idx] = EditorHighlight::MlComment;
+                            }
+                        }
+                        idx += mce.len();
+                        in_comment = false;
+                        prev_step = true;
+                        continue;
+                    } else {
+                        idx += 1;
+                        continue;
+                    }
+                } else if render[idx..].starts_with(&mcs) {
+                    for hl_idx in idx..idx + mcs.len() {
+                        if hl_idx < highlight.len() {
+                            highlight[hl_idx] = EditorHighlight::MlComment;
+                        }
+                    }
+                    idx += mcs.len();
+                    in_comment = true;
+                    continue;
+                }
             }
 
             if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_STRINGS != 0 {
@@ -251,6 +297,28 @@ impl Row {
                     idx += 1;
                     prev_step = false;
                     continue;
+                }
+            }
+
+            if prev_step {
+                for kw1 in keywords1.iter() {
+                    if render[idx..].starts_with(kw1) {
+                        for h_idx in idx..idx + kw1.len() {
+                            highlight[h_idx] = EditorHighlight::Keyword1;
+                        }
+                        idx += kw1.len();
+                        break;
+                    }
+                }
+
+                for kw2 in keywords2.iter() {
+                    if render[idx..].starts_with(kw2) {
+                        for h_idx in idx..idx + kw2.len() {
+                            highlight[h_idx] = EditorHighlight::Keyword2;
+                        }
+                        idx += kw2.len();
+                        break;
+                    }
                 }
             }
 
@@ -313,19 +381,13 @@ struct EditorSyntax {
     file_type: String,
     file_match: Vec<String>,
     single_comment_start: String,
+    multiline_comment_start: String,
+    multiline_comment_end: String,
+    keywords1: Vec<String>,
+    keywords2: Vec<String>,
     flags: i32,
 }
 
-impl EditorSyntax {
-    fn new(file_type: String, file_match: Vec<String>,single_comment_start: String, flags: i32) -> Self {
-        EditorSyntax {
-            file_type,
-            file_match,
-            single_comment_start,
-            flags,
-        }
-    }
-}
 
 pub struct Editor {
     _term_settings: TermSettings,
@@ -352,6 +414,9 @@ pub struct Editor {
 enum EditorHighlight {
     Normal,
     Comment,
+    MlComment,
+    Keyword1,
+    Keyword2,
     String,
     Number,
     Match,
@@ -360,7 +425,9 @@ enum EditorHighlight {
 impl EditorHighlight {
     fn to_color(&self) -> usize {
         match self {
-            EditorHighlight::Comment => 36,
+            EditorHighlight::Comment | EditorHighlight::MlComment => 36,
+            EditorHighlight::Keyword1 => 33,
+            EditorHighlight::Keyword2 => 32,
             EditorHighlight::String => 35,
             EditorHighlight::Number => 31,
             EditorHighlight::Match => 34,
@@ -395,12 +462,22 @@ impl Editor {
                 file_type: "rs".to_string(),
                 file_match: vec![".rs".to_string()],
                 single_comment_start: "//".to_string(),
+                multiline_comment_start: "/*".to_string(),
+                multiline_comment_end: "*/".to_string(),
+                keywords1: ["abstract", "alignof", "as", "become", "box", "break", "const", "continue",
+                    "crate", "do", "else", "enum", "extern", "false", "final", "fn", "for", "if",
+                    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "offsetof",
+                    "override", "priv", "proc", "pub", "pure", "ref", "return", "Self", "self",
+                    "sizeof", "static", "struct", "super", "trait", "true", "type", "typeof",
+                    "unsafe", "unsized", "use", "virtual", "where", "while", "yield", "bool", "char",
+                    "str"].map(|k| k.to_string()).into_iter().collect::<Vec<String>>(),
+                keywords2: ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32",
+                    "f64"].map(|k| k.to_string()).into_iter().collect(),
                 flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
             }],
             curr_editor_syntax: None,
         })
     }
-
 
     pub fn editor_open(&mut self, file_path: &str) {
         self.filename = Some(file_path.to_string());
@@ -520,8 +597,8 @@ impl Editor {
                 for hl_entry in &self.editor_syntax_db {
                     if hl_entry.file_type == ext_str {
                         self.curr_editor_syntax = Some(hl_entry.clone());
-                        let new_rows: Vec<Row> = self.rows.iter().map(|r| {
-                            let new_row = Row::from_string(&r.row, &self.curr_editor_syntax);
+                        let new_rows: Vec<Row> = self.rows.iter().enumerate().map(|(idx, r)| {
+                            let mut new_row = Row::from_string(idx, &r.row, &self.curr_editor_syntax);
                             new_row
                         }).collect();
                         self.rows = new_rows;
@@ -607,7 +684,8 @@ impl Editor {
             self.cx = self.rows[self.cy - 1].row.len();
             let last_row = self.rows[self.cy - 1].row.as_str();
             let curr_row = self.rows[self.cy].row.as_str();
-            self.rows[self.cy - 1] = Row::from_string(&(last_row.to_string() + curr_row), &self.curr_editor_syntax);
+            let new_row = Row::from_string(self.cy - 1,&(last_row.to_string() + curr_row), &self.curr_editor_syntax);
+            self.rows[self.cy - 1] = new_row;
             self.del_row(self.cy);
             self.cy -= 1;
             self.dirty += 1;
@@ -619,13 +697,15 @@ impl Editor {
             return;
         }
 
-        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_content, &self.curr_editor_syntax));
+        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_idx,row_content, &self.curr_editor_syntax));
+        self.rows.iter_mut().enumerate().for_each(|(idx, row)| row.set_idx(idx));
         self.dirty += 1;
     }
 
     fn del_row(&mut self, row_idx: usize) {
         if row_idx >= self.num_rows() { return; }
         Vec::remove(&mut self.rows, row_idx);
+        self.rows.iter_mut().enumerate().for_each(|(idx, row)| row.set_idx(idx));
         self.dirty += 1;
     }
 
@@ -636,7 +716,7 @@ impl Editor {
             let row_string = &self.rows[self.cy].row.clone();
             self.insert_row(self.cy + 1, &row_string[self.cx..]);
             let row = self.rows[self.cy].row[..self.cx].to_string();
-            self.rows[self.cy] = Row::from_string(row.as_str(), &self.curr_editor_syntax);
+            self.rows[self.cy] = Row::from_string(self.cy,row.as_str(), &self.curr_editor_syntax);
         }
         self.cy += 1;
         self.cx = 0;
@@ -874,7 +954,15 @@ impl Editor {
                     let hl = &self.rows[row_num].hl[self.col_off..];
                     let mut current_color = 0;
                     for (idx, char) in self.rows[row_num].render[col_num..col_num + len].to_string().chars().enumerate() {
-                        if hl[idx] == EditorHighlight::Normal {
+                        if char.is_control() {
+                            let sym = if char as u8 <= 26 { '@' as u8 + char as u8 } else { '?' as u8 };
+                            buff.extend("\x1b[7m".as_bytes());
+                            buff.push(sym);
+                            buff.extend("\x1b[m".as_bytes());
+                            if current_color != 0 {
+                                buff.extend(format!("\x1b[%{}m", current_color).as_bytes());
+                            }
+                        } else if hl[idx] == EditorHighlight::Normal {
                             if current_color != 0 {
                                 buff.extend("\x1b[39m".as_bytes());
                                 current_color = 0;
