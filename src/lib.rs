@@ -155,7 +155,6 @@ struct Row {
     render: String,
     hl: Vec<EditorHighlight>,
     hl_open_comment: bool,
-    ed_syntax: Option<EditorSyntax>
 }
 
 impl Row {
@@ -167,12 +166,7 @@ impl Row {
             render,
             hl: highlight,
             hl_open_comment: false,
-            ed_syntax: editor_syntax.clone()
         }
-    }
-
-    pub fn set_idx(&mut self, idx: usize) {
-        self.idx = idx;
     }
 
     pub fn insert_at_pos(&mut self, pos: usize, ch: u8, editor_syntax: &Option<EditorSyntax>) {
@@ -217,8 +211,6 @@ impl Row {
         let keywords2 = syntax.keywords2.clone();
 
         let scs = syntax.single_comment_start.clone();
-        let mcs = syntax.multiline_comment_start.clone();
-        let mce = syntax.multiline_comment_end.clone();
 
         let mut prev_step = true;
         let mut in_string = 0;
@@ -235,35 +227,6 @@ impl Row {
                     highlight[h_idx] = EditorHighlight::Comment;
                 }
                 break;
-            }
-
-            if !mcs.is_empty() && !mce.is_empty() && in_string == 0 {
-                if in_comment {
-                    highlight[idx] = EditorHighlight::MlComment;
-                    if render[idx..].starts_with(&mce) {
-                        for hl_idx in idx..idx + mce.len() {
-                            if hl_idx < highlight.len() {
-                                highlight[hl_idx] = EditorHighlight::MlComment;
-                            }
-                        }
-                        idx += mce.len();
-                        in_comment = false;
-                        prev_step = true;
-                        continue;
-                    } else {
-                        idx += 1;
-                        continue;
-                    }
-                } else if render[idx..].starts_with(&mcs) {
-                    for hl_idx in idx..idx + mcs.len() {
-                        if hl_idx < highlight.len() {
-                            highlight[hl_idx] = EditorHighlight::MlComment;
-                        }
-                    }
-                    idx += mcs.len();
-                    in_comment = true;
-                    continue;
-                }
             }
 
             if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_STRINGS != 0 {
@@ -381,8 +344,6 @@ struct EditorSyntax {
     file_type: String,
     file_match: Vec<String>,
     single_comment_start: String,
-    multiline_comment_start: String,
-    multiline_comment_end: String,
     keywords1: Vec<String>,
     keywords2: Vec<String>,
     flags: i32,
@@ -414,7 +375,6 @@ pub struct Editor {
 enum EditorHighlight {
     Normal,
     Comment,
-    MlComment,
     Keyword1,
     Keyword2,
     String,
@@ -425,7 +385,7 @@ enum EditorHighlight {
 impl EditorHighlight {
     fn to_color(&self) -> usize {
         match self {
-            EditorHighlight::Comment | EditorHighlight::MlComment => 36,
+            EditorHighlight::Comment => 36,
             EditorHighlight::Keyword1 => 33,
             EditorHighlight::Keyword2 => 32,
             EditorHighlight::String => 35,
@@ -462,8 +422,6 @@ impl Editor {
                 file_type: "rs".to_string(),
                 file_match: vec![".rs".to_string()],
                 single_comment_start: "//".to_string(),
-                multiline_comment_start: "/*".to_string(),
-                multiline_comment_end: "*/".to_string(),
                 keywords1: ["abstract", "alignof", "as", "become", "box", "break", "const", "continue",
                     "crate", "do", "else", "enum", "extern", "false", "final", "fn", "for", "if",
                     "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "offsetof",
@@ -684,7 +642,7 @@ impl Editor {
             self.cx = self.rows[self.cy - 1].row.len();
             let last_row = self.rows[self.cy - 1].row.as_str();
             let curr_row = self.rows[self.cy].row.as_str();
-            let new_row = Row::from_string(self.cy - 1,&(last_row.to_string() + curr_row), &self.curr_editor_syntax);
+            let new_row = Row::from_string(self.cy - 1, &(last_row.to_string() + curr_row), &self.curr_editor_syntax);
             self.rows[self.cy - 1] = new_row;
             self.del_row(self.cy);
             self.cy -= 1;
@@ -697,15 +655,13 @@ impl Editor {
             return;
         }
 
-        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_idx,row_content, &self.curr_editor_syntax));
-        self.rows.iter_mut().enumerate().for_each(|(idx, row)| row.set_idx(idx));
+        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_idx, row_content, &self.curr_editor_syntax));
         self.dirty += 1;
     }
 
     fn del_row(&mut self, row_idx: usize) {
         if row_idx >= self.num_rows() { return; }
         Vec::remove(&mut self.rows, row_idx);
-        self.rows.iter_mut().enumerate().for_each(|(idx, row)| row.set_idx(idx));
         self.dirty += 1;
     }
 
@@ -716,7 +672,7 @@ impl Editor {
             let row_string = &self.rows[self.cy].row.clone();
             self.insert_row(self.cy + 1, &row_string[self.cx..]);
             let row = self.rows[self.cy].row[..self.cx].to_string();
-            self.rows[self.cy] = Row::from_string(self.cy,row.as_str(), &self.curr_editor_syntax);
+            self.rows[self.cy] = Row::from_string(self.cy, row.as_str(), &self.curr_editor_syntax);
         }
         self.cy += 1;
         self.cx = 0;
