@@ -1,3 +1,0 @@
-fn main() {
- "aksflajfklajsf"
-}

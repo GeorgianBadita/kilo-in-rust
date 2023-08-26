@@ -2,3 +2,4 @@
 .idea
 .DS_Store
 file.rs
+test.rs
