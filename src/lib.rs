@@ -30,9 +30,8 @@ pub fn erase_screen_for_exit() {
     stdout().flush().unwrap();
 }
 
-
 fn is_separator(c: char) -> bool {
-    return c.is_ascii_whitespace() || c == '\0' || ",.()+-/*=~%<>[];".contains(c);
+    c.is_ascii_whitespace() || c == '\0' || ",.()+-/*=~%<>[];".contains(c)
 }
 
 fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
@@ -45,11 +44,11 @@ fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
         editor.search_state.direction = 1;
         editor.search_state.last_match = -1;
         return;
-    } else if key == EditorKey::SpecialKey(EditorSpecialKey::ArrowRight)
-        || key == EditorKey::SpecialKey(EditorSpecialKey::ArrowDown) {
+    } else if key == EditorKey::ArrowRight
+        || key == EditorKey::ArrowDown {
         editor.search_state.direction = 1;
-    } else if key == EditorKey::SpecialKey(EditorSpecialKey::ArrowLeft)
-        || key == EditorKey::SpecialKey(EditorSpecialKey::ArrowUp) {
+    } else if key == EditorKey::ArrowLeft
+        || key == EditorKey::ArrowUp {
         editor.search_state.direction = -1;
     } else {
         editor.search_state.direction = 1;
@@ -72,6 +71,7 @@ fn editor_find_callback(editor: &mut Editor, query: &String, key: EditorKey) {
 
         let num_rows = editor.num_rows();
         let row = &mut editor.rows[current as usize];
+
         if let Some(pos) = row.render.find(query) {
             editor.search_state.last_match = current;
             editor.cy = current as usize;
@@ -130,7 +130,7 @@ impl Drop for TermSettings {
 
 
 #[derive(Debug, PartialEq)]
-enum EditorSpecialKey {
+enum EditorKey {
     ArrowLeft,
     ArrowRight,
     ArrowUp,
@@ -141,35 +141,26 @@ enum EditorSpecialKey {
     EndKey,
     PageUp,
     PageDown,
-}
-
-#[derive(Debug, PartialEq)]
-enum EditorKey {
-    SpecialKey(EditorSpecialKey),
     Key(char),
 }
 
 struct Row {
-    idx: usize,
     row: String,
     render: String,
     hl: Vec<EditorHighlight>,
-    hl_open_comment: bool,
 }
 
 impl Row {
-    fn from_string(idx: usize, row: &str, editor_syntax: &Option<EditorSyntax>) -> Row {
+    fn from_string(row: &str, editor_syntax: &Option<&Syntax>) -> Row {
         let (render, highlight) = Self::update_row(row, editor_syntax);
         Row {
-            idx,
             row: row.to_string(),
             render,
             hl: highlight,
-            hl_open_comment: false,
         }
     }
 
-    pub fn insert_at_pos(&mut self, pos: usize, ch: u8, editor_syntax: &Option<EditorSyntax>) {
+    pub fn insert_at_pos(&mut self, pos: usize, ch: u8, editor_syntax: &Option<&Syntax>) {
         String::insert(&mut self.row, pos, ch as char);
         let updated_row = &self.row;
         let (render, highlight) = Self::update_row(updated_row, editor_syntax);
@@ -177,7 +168,7 @@ impl Row {
         self.hl = highlight;
     }
 
-    pub fn delete_at_pos(&mut self, pos: usize, editor_syntax: &Option<EditorSyntax>) {
+    pub fn delete_at_pos(&mut self, pos: usize, editor_syntax: &Option<&Syntax>) {
         String::remove(&mut self.row, pos);
         let updated_row = &self.row;
         let (render, highlight) = Self::update_row(updated_row, editor_syntax);
@@ -185,7 +176,7 @@ impl Row {
         self.hl = highlight;
     }
 
-    fn update_row(row_str: &str, editor_syntax: &Option<EditorSyntax>) -> (String, Vec<EditorHighlight>) {
+    fn update_row(row_str: &str, editor_syntax: &Option<&Syntax>) -> (String, Vec<EditorHighlight>) {
         let mut render = String::new();
         for char in row_str.chars() {
             if char == '\t' {
@@ -199,7 +190,7 @@ impl Row {
         (render, highlight)
     }
 
-    fn update_syntax(render: &str, editor_syntax: &Option<EditorSyntax>) -> Vec<EditorHighlight> {
+    fn update_syntax(render: &str, editor_syntax: &Option<&Syntax>) -> Vec<EditorHighlight> {
         let mut highlight = vec![EditorHighlight::Normal; render.len()];
 
         if editor_syntax.as_ref().is_none() {
@@ -214,7 +205,6 @@ impl Row {
 
         let mut prev_step = true;
         let mut in_string = 0;
-        let mut in_comment = false;
 
         let mut idx = 0;
         let chars: Vec<char> = render.chars().collect();
@@ -222,9 +212,9 @@ impl Row {
             let ch = chars[idx];
             let prev_hl = if idx > 0 { highlight[idx - 1].clone() } else { EditorHighlight::Normal };
 
-            if !scs.is_empty() && in_string == 0 && !in_comment && render[idx..].starts_with(&scs) {
-                for h_idx in idx..render.len() {
-                    highlight[h_idx] = EditorHighlight::Comment;
+            if !scs.is_empty() && in_string == 0 && render[idx..].starts_with(scs) {
+                for hl in highlight.iter_mut().take(render.len()).skip(idx) {
+                    *hl = EditorHighlight::Comment;
                 }
                 break;
             }
@@ -243,31 +233,28 @@ impl Row {
                     idx += 1;
                     prev_step = true;
                     continue;
-                } else {
-                    if ch == '"' || ch == '\'' {
-                        in_string = ch as u8;
-                        highlight[idx] = EditorHighlight::String;
-                        idx += 1;
-                        continue;
-                    }
+                } else if ch == '"' || ch == '\'' {
+                    in_string = ch as u8;
+                    highlight[idx] = EditorHighlight::String;
+                    idx += 1;
+                    continue;
                 }
             }
 
-            if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_NUMBERS != 0 {
-                if (ch.is_ascii_digit() && (prev_step || prev_hl == EditorHighlight::Number)) ||
-                    (ch == '.' && prev_hl == EditorHighlight::Number) {
-                    highlight[idx] = EditorHighlight::Number;
-                    idx += 1;
-                    prev_step = false;
-                    continue;
-                }
+            if editor_syntax.as_ref().unwrap().flags & HL_HIGHLIGHT_NUMBERS != 0 &&
+                ((ch.is_ascii_digit() && (prev_step || prev_hl == EditorHighlight::Number)) ||
+                    (ch == '.' && prev_hl == EditorHighlight::Number)) {
+                highlight[idx] = EditorHighlight::Number;
+                idx += 1;
+                prev_step = false;
+                continue;
             }
 
             if prev_step {
                 for kw1 in keywords1.iter() {
                     if render[idx..].starts_with(kw1) {
-                        for h_idx in idx..idx + kw1.len() {
-                            highlight[h_idx] = EditorHighlight::Keyword1;
+                        for hl in highlight.iter_mut().skip(idx).take(kw1.len()) {
+                            *hl = EditorHighlight::Keyword1;
                         }
                         idx += kw1.len();
                         break;
@@ -276,9 +263,10 @@ impl Row {
 
                 for kw2 in keywords2.iter() {
                     if render[idx..].starts_with(kw2) {
-                        for h_idx in idx..idx + kw2.len() {
-                            highlight[h_idx] = EditorHighlight::Keyword2;
+                        for hl in highlight.iter_mut().skip(idx).take(kw2.len()) {
+                            *hl = EditorHighlight::Keyword2;
                         }
+
                         idx += kw2.len();
                         break;
                     }
@@ -288,7 +276,6 @@ impl Row {
             prev_step = is_separator(ch);
             idx += 1
         }
-
         highlight
     }
 
@@ -308,8 +295,8 @@ impl Row {
         let mut cur_rx = 0;
         let row: Vec<char> = self.row.chars().collect();
 
-        for cx in 0..self.row.len() {
-            if row[cx] == '\t' {
+        for (cx, r) in row.iter().enumerate().take(self.row.len()) {
+            if *r == '\t' {
                 cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
             }
             cur_rx += 1;
@@ -317,7 +304,7 @@ impl Row {
                 return cx;
             }
         }
-        return self.row.len() - 1;
+        self.row.len() - 1
     }
 }
 
@@ -340,36 +327,30 @@ impl Default for SearchState {
 }
 
 #[derive(Clone)]
-struct EditorSyntax {
-    file_type: String,
-    file_match: Vec<String>,
-    single_comment_start: String,
-    keywords1: Vec<String>,
-    keywords2: Vec<String>,
+struct Syntax<'a> {
+    file_type: &'a str,
+    file_match: &'a [&'a str],
+    single_comment_start: &'a str,
+    keywords1: &'a [&'a str],
+    keywords2: &'a [&'a str],
     flags: i32,
 }
 
-
-pub struct Editor {
-    _term_settings: TermSettings,
-    screen_rows: usize,
-    screen_cols: usize,
-    cx: usize,
-    cy: usize,
-    rx: usize,
-    rows: Vec<Row>,
-    row_off: usize,
-    col_off: usize,
-    filename: Option<String>,
-    status_msg: String,
-    message_time: u64,
-    dirty: usize,
-    quit_tries: usize,
-    search_state: SearchState,
-    editor_syntax_db: Vec<EditorSyntax>,
-    curr_editor_syntax: Option<EditorSyntax>,
-}
-
+const HLDB: [&Syntax; 1] = [&Syntax {
+    file_type: "rs",
+    file_match: &["rs"],
+    single_comment_start: "//",
+    keywords1: &["abstract", "alignof", "as", "become", "box", "break", "const", "continue",
+        "crate", "do", "else", "enum", "extern", "false", "final", "fn", "for", "if",
+        "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "offsetof",
+        "override", "priv", "proc", "pub", "pure", "ref", "return", "Self", "self",
+        "sizeof", "static", "struct", "super", "trait", "true", "type", "typeof",
+        "unsafe", "unsized", "use", "virtual", "where", "while", "yield", "bool", "char",
+        "str"],
+    keywords2: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32",
+        "f64", "str"],
+    flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+}];
 
 #[derive(Clone, PartialEq)]
 enum EditorHighlight {
@@ -396,10 +377,28 @@ impl EditorHighlight {
     }
 }
 
+pub struct Editor {
+    _term_settings: TermSettings,
+    screen_rows: usize,
+    screen_cols: usize,
+    cx: usize,
+    cy: usize,
+    rx: usize,
+    rows: Vec<Row>,
+    row_off: usize,
+    col_off: usize,
+    filename: Option<String>,
+    status_msg: String,
+    message_time: u64,
+    dirty: bool,
+    quit_tries: usize,
+    search_state: SearchState,
+    curr_editor_syntax: Option<&'static Syntax<'static>>,
+}
+
 impl Editor {
     pub fn from_settings(term_settings: TermSettings) -> Result<Self, &'static str> {
         let win_size_res = get_window_size()?;
-
         let (screen_cols, screen_rows) = win_size_res;
 
         Ok(Editor {
@@ -415,24 +414,9 @@ impl Editor {
             filename: None,
             status_msg: String::new(),
             message_time: 0,
-            dirty: 0,
+            dirty: false,
             quit_tries: KILO_QUIT_TIMES,
             search_state: SearchState::default(),
-            editor_syntax_db: vec![EditorSyntax {
-                file_type: "rs".to_string(),
-                file_match: vec![".rs".to_string()],
-                single_comment_start: "//".to_string(),
-                keywords1: ["abstract", "alignof", "as", "become", "box", "break", "const", "continue",
-                    "crate", "do", "else", "enum", "extern", "false", "final", "fn", "for", "if",
-                    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "offsetof",
-                    "override", "priv", "proc", "pub", "pure", "ref", "return", "Self", "self",
-                    "sizeof", "static", "struct", "super", "trait", "true", "type", "typeof",
-                    "unsafe", "unsized", "use", "virtual", "where", "while", "yield", "bool", "char",
-                    "str"].map(|k| k.to_string()).into_iter().collect::<Vec<String>>(),
-                keywords2: ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32",
-                    "f64"].map(|k| k.to_string()).into_iter().collect(),
-                flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
-            }],
             curr_editor_syntax: None,
         })
     }
@@ -446,12 +430,11 @@ impl Editor {
             .filter(|r| r.is_ok())
             .map(|r| r.unwrap().trim_end().to_string())
             .for_each(|line| self.insert_row(self.num_rows(), &line));
-        self.dirty = 0;
+        self.dirty = false;
     }
 
     pub fn refresh_screen(&mut self) {
         self.editor_scroll();
-
         let mut buff: Vec<u8> = Vec::new();
         buff.extend("\x1b[?25l".as_bytes());
         buff.extend("\x1b[H".as_bytes());
@@ -463,7 +446,6 @@ impl Editor {
         buff.extend(format!("\x1b[{};{}H",
                             (self.cy as i32 - self.row_off as i32) + 1,
                             (self.rx as i32 - self.col_off as i32) + 1).as_bytes());
-
         buff.extend("\x1b[?25h".as_bytes());
 
         stdout().write_all(&buff).unwrap();
@@ -474,25 +456,25 @@ impl Editor {
         let mut io_in = stdin();
         let c = Self::editor_read_key(&mut io_in);
         match c {
-            EditorKey::SpecialKey(EditorSpecialKey::Backspace) => {
+            EditorKey::Backspace => {
                 self.del_char();
             }
-            EditorKey::SpecialKey(EditorSpecialKey::DelKey) => {
-                self.editor_move_cursor(EditorSpecialKey::ArrowRight);
+            EditorKey::DelKey => {
+                self.editor_move_cursor(EditorKey::ArrowRight);
                 self.del_char();
             }
-            EditorKey::SpecialKey(EditorSpecialKey::HomeKey) => {
+            EditorKey::HomeKey => {
                 self.cx = 0;
             }
-            EditorKey::SpecialKey(EditorSpecialKey::EndKey) => {
+            EditorKey::EndKey => {
                 if self.cx < self.num_rows() {
                     self.cx = self.rows[self.cy].row.len();
                 }
             }
-            EditorKey::SpecialKey(EditorSpecialKey::PageUp) | EditorKey::SpecialKey(EditorSpecialKey::PageDown) => {
-                if c == EditorKey::SpecialKey(EditorSpecialKey::PageUp) {
+            EditorKey::PageUp | EditorKey::PageDown => {
+                if c == EditorKey::PageUp {
                     self.cy = self.row_off;
-                } else if c == EditorKey::SpecialKey(EditorSpecialKey::PageDown) {
+                } else if c == EditorKey::PageDown {
                     self.cy = self.row_off + self.screen_rows - 1;
                     if self.cy > self.num_rows() {
                         self.cy = self.num_rows();
@@ -502,11 +484,11 @@ impl Editor {
                 let mut times = self.screen_rows;
                 while times > 0 {
                     times -= 1;
-                    self.editor_move_cursor(if c == EditorKey::SpecialKey(EditorSpecialKey::PageUp)
-                    { EditorSpecialKey::ArrowUp } else { EditorSpecialKey::ArrowDown })
+                    self.editor_move_cursor(if c == EditorKey::PageUp
+                    { EditorKey::ArrowUp } else { EditorKey::ArrowDown })
                 }
             }
-            EditorKey::SpecialKey(key) => self.editor_move_cursor(key),
+            EditorKey::ArrowLeft | EditorKey::ArrowRight | EditorKey::ArrowUp | EditorKey::ArrowDown => self.editor_move_cursor(c),
             EditorKey::Key('\r') => {
                 self.insert_new_line()
             }
@@ -525,7 +507,7 @@ impl Editor {
                 // nothing
             }
             EditorKey::Key(c) if c == CTRL_Q => {
-                if self.dirty > 0 && self.quit_tries > 0 {
+                if self.dirty && self.quit_tries > 0 {
                     self.editor_set_status_message(&format!("WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.", self.quit_tries));
                     self.quit_tries -= 1;
                     return false;
@@ -537,7 +519,6 @@ impl Editor {
                 self.insert_char(c as u8);
             }
         }
-
         self.quit_tries = KILO_QUIT_TIMES;
         false
     }
@@ -552,12 +533,11 @@ impl Editor {
             let ext = Path::new(filename).extension();
             if let Some(extension) = ext {
                 let ext_str = extension.to_str().unwrap();
-                for hl_entry in &self.editor_syntax_db {
-                    if hl_entry.file_type == ext_str {
-                        self.curr_editor_syntax = Some(hl_entry.clone());
-                        let new_rows: Vec<Row> = self.rows.iter().enumerate().map(|(idx, r)| {
-                            let mut new_row = Row::from_string(idx, &r.row, &self.curr_editor_syntax);
-                            new_row
+                for hl_entry in HLDB {
+                    if hl_entry.file_match.contains(&ext_str) {
+                        self.curr_editor_syntax = Some(hl_entry);
+                        let new_rows: Vec<Row> = self.rows.iter().map(|r| {
+                            Row::from_string(&r.row, &self.curr_editor_syntax)
                         }).collect();
                         self.rows = new_rows;
                         break;
@@ -607,7 +587,7 @@ impl Editor {
         file.set_len(num_bytes as u64)?;
         file.write_all(rows_to_string.as_bytes())?;
         self.editor_set_status_message(&format!("{} bytes saved to disk", num_bytes));
-        self.dirty = 0;
+        self.dirty = false;
 
         Ok(())
     }
@@ -623,7 +603,7 @@ impl Editor {
         }
         self.rows[self.cy].insert_at_pos(self.cx, ch, &self.curr_editor_syntax);
         self.cx += 1;
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn del_char(&mut self) {
@@ -637,16 +617,16 @@ impl Editor {
         if self.cx > 0 {
             self.rows[self.cy].delete_at_pos(self.cx - 1, &self.curr_editor_syntax);
             self.cx -= 1;
-            self.dirty += 1;
+            self.dirty = true;
         } else {
             self.cx = self.rows[self.cy - 1].row.len();
             let last_row = self.rows[self.cy - 1].row.as_str();
             let curr_row = self.rows[self.cy].row.as_str();
-            let new_row = Row::from_string(self.cy - 1, &(last_row.to_string() + curr_row), &self.curr_editor_syntax);
+            let new_row = Row::from_string(&(last_row.to_string() + curr_row), &self.curr_editor_syntax);
             self.rows[self.cy - 1] = new_row;
             self.del_row(self.cy);
             self.cy -= 1;
-            self.dirty += 1;
+            self.dirty = true;
         }
     }
 
@@ -654,15 +634,14 @@ impl Editor {
         if row_idx > self.num_rows() {
             return;
         }
-
-        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_idx, row_content, &self.curr_editor_syntax));
-        self.dirty += 1;
+        Vec::insert(&mut self.rows, row_idx, Row::from_string(row_content, &self.curr_editor_syntax));
+        self.dirty = true;
     }
 
     fn del_row(&mut self, row_idx: usize) {
         if row_idx >= self.num_rows() { return; }
         Vec::remove(&mut self.rows, row_idx);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn insert_new_line(&mut self) {
@@ -672,7 +651,7 @@ impl Editor {
             let row_string = &self.rows[self.cy].row.clone();
             self.insert_row(self.cy + 1, &row_string[self.cx..]);
             let row = self.rows[self.cy].row[..self.cx].to_string();
-            self.rows[self.cy] = Row::from_string(self.cy, row.as_str(), &self.curr_editor_syntax);
+            self.rows[self.cy] = Row::from_string(row.as_str(), &self.curr_editor_syntax);
         }
         self.cy += 1;
         self.cx = 0;
@@ -700,7 +679,7 @@ impl Editor {
                 return Some(buff);
             }
             match c {
-                EditorKey::SpecialKey(EditorSpecialKey::DelKey) | EditorKey::SpecialKey(EditorSpecialKey::Backspace) => {
+                EditorKey::DelKey | EditorKey::Backspace => {
                     if !buff.is_empty() {
                         buff.pop();
                     }
@@ -759,37 +738,37 @@ impl Editor {
 
                     if third as char == '~' {
                         if second as char == '1' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::HomeKey);
+                            return EditorKey::HomeKey;
                         } else if second as char == '3' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::DelKey);
+                            return EditorKey::DelKey;
                         } else if second as char == '4' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::EndKey);
+                            return EditorKey::EndKey;
                         } else if second as char == '5' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::PageUp);
+                            return EditorKey::PageUp;
                         } else if second as char == '6' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::PageDown);
+                            return EditorKey::PageDown;
                         } else if second as char == '7' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::HomeKey);
+                            return EditorKey::HomeKey;
                         } else if second as char == '8' {
-                            return EditorKey::SpecialKey(EditorSpecialKey::EndKey);
+                            return EditorKey::EndKey;
                         }
                     }
                 } else {
                     match second as char {
-                        'A' => return EditorKey::SpecialKey(EditorSpecialKey::ArrowUp),
-                        'B' => return EditorKey::SpecialKey(EditorSpecialKey::ArrowDown),
-                        'C' => return EditorKey::SpecialKey(EditorSpecialKey::ArrowRight),
-                        'D' => return EditorKey::SpecialKey(EditorSpecialKey::ArrowLeft),
-                        'H' => return EditorKey::SpecialKey(EditorSpecialKey::HomeKey),
-                        'F' => return EditorKey::SpecialKey(EditorSpecialKey::EndKey),
+                        'A' => return EditorKey::ArrowUp,
+                        'B' => return EditorKey::ArrowDown,
+                        'C' => return EditorKey::ArrowRight,
+                        'D' => return EditorKey::ArrowLeft,
+                        'H' => return EditorKey::HomeKey,
+                        'F' => return EditorKey::EndKey,
                         _ => {}
                     }
                 }
             } else if first as char == 'O' {
                 if second as char == 'H' {
-                    return EditorKey::SpecialKey(EditorSpecialKey::HomeKey);
+                    return EditorKey::HomeKey;
                 } else if second as char == 'F' {
-                    return EditorKey::SpecialKey(EditorSpecialKey::EndKey);
+                    return EditorKey::EndKey;
                 }
             }
 
@@ -798,20 +777,19 @@ impl Editor {
 
         // Backspace
         if c == 127 {
-            return EditorKey::SpecialKey(EditorSpecialKey::Backspace);
+            return EditorKey::Backspace;
         }
         EditorKey::Key(c as char)
     }
 
-
-    fn editor_move_cursor(&mut self, key: EditorSpecialKey) {
+    fn editor_move_cursor(&mut self, key: EditorKey) {
         let mut row = None;
         if self.cy < self.num_rows() {
             row = Some(&self.rows[self.cy]);
         }
 
         match key {
-            EditorSpecialKey::ArrowLeft => {
+            EditorKey::ArrowLeft => {
                 if self.cx != 0 {
                     self.cx -= 1;
                 } else if self.cy > 0 {
@@ -821,7 +799,7 @@ impl Editor {
                     }
                 }
             }
-            EditorSpecialKey::ArrowRight => {
+            EditorKey::ArrowRight => {
                 if row.is_some() && self.cx < row.unwrap().row.len() {
                     self.cx += 1;
                 } else {
@@ -829,8 +807,8 @@ impl Editor {
                     self.cx = 0;
                 }
             }
-            EditorSpecialKey::ArrowUp if self.cy != 0 => self.cy -= 1,
-            EditorSpecialKey::ArrowDown  if self.cy < self.num_rows() => self.cy += 1,
+            EditorKey::ArrowUp if self.cy != 0 => self.cy -= 1,
+            EditorKey::ArrowDown  if self.cy < self.num_rows() => self.cy += 1,
             _ => {}
         }
 
@@ -848,7 +826,6 @@ impl Editor {
             buff.extend(self.status_msg.as_bytes());
         }
     }
-
 
     fn editor_scroll(&mut self) {
         self.rx = 0;
@@ -911,7 +888,7 @@ impl Editor {
                     let mut current_color = 0;
                     for (idx, char) in self.rows[row_num].render[col_num..col_num + len].to_string().chars().enumerate() {
                         if char.is_control() {
-                            let sym = if char as u8 <= 26 { '@' as u8 + char as u8 } else { '?' as u8 };
+                            let sym = if char as u8 <= 26 { b'@' + char as u8 } else { b'?' };
                             buff.extend("\x1b[7m".as_bytes());
                             buff.push(sym);
                             buff.extend("\x1b[m".as_bytes());
@@ -936,7 +913,6 @@ impl Editor {
                     buff.extend("\x1b[39m".as_bytes());
                 }
             }
-
             buff.extend("\x1b[K".as_bytes());
             buff.extend("\r\n".as_bytes());
         }
@@ -945,16 +921,16 @@ impl Editor {
     fn editor_draw_status_bar(&self, buff: &mut Vec<u8>) {
         buff.extend("\x1b[7m".as_bytes());
         let num_rows = self.rows.len();
-        let status_bytes = format!("{:.20} - {} lines {}",
+        let status_bytes = format!("{:.30} - {} lines {}",
                                    if let Some(filename) = self.filename.as_ref()
                                    { filename } else { "[No Name]" }, num_rows,
-                                   if self.dirty > 0 { "(modified)" } else { "" }).to_string();
+                                   if self.dirty { "(modified)" } else { "" }).to_string();
 
         let mut len = min(status_bytes.len(), self.screen_cols);
 
         let line_info_bytes = format!("{} | {}/{}",
                                       if let Some(syntax) = self.curr_editor_syntax.as_ref()
-                                      { &syntax.file_type } else { "no file type" },
+                                      { syntax.file_type } else { "no file type" },
                                       self.cy + 1, self.num_rows()).to_string();
         let info_len = line_info_bytes.len();
 
@@ -978,13 +954,11 @@ impl Editor {
     }
 }
 
-
 fn get_cursor_position() -> Result<(usize, usize), &'static str> {
     stdout().write_all("\x1b[6n".as_bytes()).unwrap();
     stdout().flush().unwrap();
 
     let mut buff: [u8; 32] = [0; 32];
-
     let chars_read = stdin().read(&mut buff).unwrap();
 
     if buff[0] as char != '\x1b' || buff[1] as char != '[' {
@@ -1006,7 +980,6 @@ fn get_window_size() -> Result<(usize, usize), &'static str> {
     if let Ok(r) = ioctl_res {
         return Ok((r.ws_col as usize, r.ws_row as usize));
     }
-
     // Go down and right 999 cols
     stdout().write_all("\x1b[999C\x1b[999B".as_bytes()).unwrap_or_else(|e| {
         erase_screen_for_exit();
@@ -1016,7 +989,6 @@ fn get_window_size() -> Result<(usize, usize), &'static str> {
         erase_screen_for_exit();
         panic!("{}", e);
     });
-
     return get_cursor_position();
 }
 

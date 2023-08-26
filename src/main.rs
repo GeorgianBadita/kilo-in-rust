@@ -7,7 +7,6 @@ use kilo_in_rust::{Editor, erase_screen_for_exit, TermSettings};
 
 fn run_editor(editor: &mut Editor) {
     editor.editor_set_status_message("HELP: CTRL-S = save | CTRL-Q = quit | CTRL-F = find");
-
     loop {
         editor.refresh_screen();
         if editor.editor_process_key_press() {
@@ -15,7 +14,6 @@ fn run_editor(editor: &mut Editor) {
         }
     };
 }
-
 
 fn main() {
     let term_settings = TermSettings::from_fd(stdin().as_raw_fd());
